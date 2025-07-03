@@ -25,3 +25,7 @@ It'll expect either a string of the assembly program, or a file location to the 
 | `BRP`   | 7      | Yes      | Branches to the given address if the accumulator is zero or positive. |
 | `INP`   | 8      | No       | Takes input and stores it in the accumulator. |
 | `OUT`   | 9      | No       | Outputs the value in the accumulator. |
+
+## License
+
+licensed under [MIT](/LICENSE)
