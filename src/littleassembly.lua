@@ -31,7 +31,6 @@ local instruction_set = {
         opcode = 1,
         requires_operand = true,
         command_handler = function(machine, address)
-            -- add whatever is in address to accumulator
             machine.accumulator = machine.addresses[address] + machine.accumulator
         end
     },
@@ -39,7 +38,6 @@ local instruction_set = {
         opcode = 2,
         requires_operand = true,
         command_handler = function(machine, address)
-            -- sub whatever is
             machine.accumulator = machine.accumulator - machine.addresses[address]
         end
     },
@@ -61,7 +59,7 @@ local instruction_set = {
         opcode = 5,
         requires_operand = true,
         command_handler = function(machine, address)
-            machine.program_counter = address
+            machine.program_counter = address - 1
         end
     },
     BRZ = {
@@ -69,7 +67,7 @@ local instruction_set = {
         requires_operand = true,
         command_handler = function(machine, address)
             if machine.accumulator == 0 then
-                machine.program_counter = address
+                machine.program_counter = address - 1
             end
         end
     },
@@ -78,7 +76,7 @@ local instruction_set = {
         requires_operand = true,
         command_handler = function(machine, address)
             if machine.accumulator >= 0 then
-                machine.program_counter = address
+                machine.program_counter = address - 1
             end
         end
     },
@@ -87,7 +85,7 @@ local instruction_set = {
         requires_operand = false,
         command_handler = function(machine)
             -- i dont think this is standard of the LMC but icba its only minor
-            print("input required:")
+            print("INPUT:")
             local input = io.read()
 
             if not tonumber(input) then
@@ -108,12 +106,13 @@ local instruction_set = {
         command_handler = function(machine)
             -- i dont think this is standard of the LMC but icba its only minor
             table.insert(machine.output, machine.accumulator)
-            print("OUTPUT" .. machine.accumulator)
+            print("OUTPUT: " .. machine.accumulator)
         end
     },
 }
 
 local function get_command_from_input(input)
+    input = string.upper(input)
     return instruction_set[input]
 end
 
@@ -126,18 +125,20 @@ local function split_string(input, separator)
 
     for str in string.gmatch(input, '([^' .. separator .. ']+)') do
         table.insert(separated_string_table, str)
+        --print(str)
     end
 
     return separated_string_table
 end
 
 local function construct_address_value_for_op(opcode, address)
-    return tonumber(tostring(opcode) .. tostring(address))
+    -- opcode goes x00 and + address will make xYY where YY is address
+    return opcode * 100 + address
 end
 
 little_assembly._instruction_set = instruction_set
 
--- parse and interpret
+-- parse and assemble
 little_assembly.assemble = function(machine, assembly)
     -- assembly is a string (and we should separate everything based off)
 
@@ -146,112 +147,160 @@ little_assembly.assemble = function(machine, assembly)
     local labels = {}
 
 
-    -- first pass for collecting all DAT labels
+    -- first pass for collecting all labels
     local function first_pass()
-        -- variables for the loop
-        local current_address = 1
+        --[[
+            a label is basically another way of representing a memory address
+            so '<label> instruction' basically says, right, where instruction is, this is technically our memory address.
+            and therefore, if we do
+            '<label> DAT 2', that basically says where this instruction is (DAT), this is what memory address we're linking to.
+            but for DAT, it just evaluates to 2.
+
+            when we reference a label for an operand, it'll probably look something like
+            'ADD <label>' or '<instruction> <label>'.
+            we want to replace these labels with the actual memory address of the location of the prior labels
+        ]]
+
         local index = 1
+        local memory_address = 1
 
-        -- go through each string and check if it's a DAT
         while index <= #separated_assembly do
-            local word = separated_assembly[index]
+            local token = separated_assembly[index]
 
-            local command = get_command_from_input(word)
+            -- we want to check if it's a command first
+            local command = get_command_from_input(token)
 
-            if command == nil then
-                -- this could potentially be a label, so check for colon ":"
-                local label_name = word
-                if string.sub(word, #word, #word) == ':' then
-                    label_name = word:sub(1, -2) -- remove the trailing ':'
-                end
+            if command then
+                -- where we specifically deal with label REFERENCES
+                if command.requires_operand == true then
+                    local potential_operand = separated_assembly[index + 1]
 
-                -- let's check the i + 1 word is DAT, if so then this is a data label as expected,
-                if separated_assembly[index + 1] == "DAT" then
-                    if separated_assembly[index + 2] then
-                        if tonumber(separated_assembly[index + 2]) then
-                            labels[label_name] = current_address
-                            machine.addresses[current_address] = tonumber(separated_assembly[index + 2])
-                        else
-                            error("invalid value given for DAT")
-                        end
-                    else
-                        labels[label_name] = current_address
-                        machine.addresses[current_address] = 0
-                    end
-
-                    index = index + 2
-                    current_address = current_address + 1
-                else
-                    -- it's probably just a regular label, so we can force check by seeing if any instruction exists after it
-                    if separated_assembly[index + 1] then
-                        if get_command_from_input(separated_assembly[index + 1]) then
-                            labels[label_name] = current_address
-                        else
-                            error("no instruction provided for label " .. label_name)
-                        end
-                    else
-                        error("no instruction provided for label " .. label_name)
+                    if potential_operand then
+                        -- advance forward by an extra 1 (on top of 1 later on, so 2 in total)
+                        index = index + 1
                     end
                 end
             else
-                -- command let's not do anything since it's first pass
+                -- where we specifically deal with label DECLARATIONS
+
+                -- if the item in front of it is an instruction, it's a label pointing to said instruction
+                local potential_command = get_command_from_input(separated_assembly[index + 1])
+
+                if potential_command then
+                    -- we basically delete the label here since it's a declaration but it's to point to an instruction
+                    labels[token] = memory_address
+                    memory_address = memory_address - 1
+                else
+                    -- this is 100% a DAT declaration
+                    if string.upper(separated_assembly[index + 1]) == "DAT" then
+                        -- we also want to check if it's explicitly declaring any value at all, and if not we just default to 0
+                        local potential_value = separated_assembly[index + 2]
+
+                        if potential_value then
+                            -- make sure it's an integer/number
+                            if tonumber(potential_value) then
+                                labels[token] = memory_address
+                                machine.addresses[memory_address] = potential_value
+
+                                index = index + 2
+                            else
+                                labels[token] = memory_address
+                                machine.addresses[memory_address] = 0
+                                index = index + 1
+                            end
+                        else
+                            labels[token] = memory_address
+                            -- it's already zeroed out anyways..
+                            index = index + 1
+                        end
+                    end
+                end
             end
 
             index = index + 1
-            -- moved current address increment inside of the other lines so dw still here
-
-            assert(current_address <= #machine.addresses, "program too large for allocated memory")
+            memory_address = memory_address + 1
         end
     end
 
     -- second pass for assembling the code into the memory addresses
     local function second_pass()
-        -- variables for the loop
-        local current_address = 1
+        --[[
+            in this pass, we are actually now properly assembling the code and replacing labels when we get to them
+        ]]
+
         local index = 1
+        local memory_address = 1
 
-        -- go through each string and check it's command + parse + load into memory
         while index <= #separated_assembly do
-            local word = separated_assembly[index]
+            local token = separated_assembly[index]
 
-            local command = get_command_from_input(word)
+            -- we want to check if it's a command first
+            local command = get_command_from_input(token)
 
-            if command == nil then
-                -- this could potentially be a label, but since the label is registered we just ditch it and offset current address by -1
-                current_address = current_address - 1
-            else
-                -- confirmed this is a command!
-                -- check if it requires address
-                if command.requires_operand then
-                    -- we should grab the second word after this
-                    if separated_assembly[index + 1] then
-                        local memory_address = tonumber(separated_assembly[index + 1])
-                        if not memory_address or memory_address == nil then
-                            -- this could be potentially a label..?
-                            if labels[separated_assembly[index + 1]] then
-                                machine.addresses[current_address] =
-                                    construct_address_value_for_op(command.opcode, labels[separated_assembly[index + 1]])
-                            else
-                                error("not a valid memory address")
-                            end
+            if command then
+                -- if it has a operand, we should check if that operand is just a raw memory address, or a label (a string)
+                if command.requires_operand == true then
+                    local potential_operand = separated_assembly[index + 1]
+
+                    if potential_operand then
+                        if tonumber(potential_operand) then
+                            -- we wanna put this in the memory address
+                            machine.addresses[memory_address] = construct_address_value_for_op(command.opcode,
+                                potential_operand)
                         else
-                            if memory_address > #machine.addresses then
-                                error("not a valid memory address (> max amount)")
+                            -- definitely a label
+                            if labels[potential_operand] then
+                                -- we wanna put this in the memory address ofc
+                                machine.addresses[memory_address] = construct_address_value_for_op(command.opcode,
+                                    labels[potential_operand])
+                            else
+                                error("unidentifiable operand for instruction " ..
+                                    token .. "" .. ". got: " .. potential_operand)
                             end
-
-                            machine.addresses[current_address] = construct_address_value_for_op(command.opcode,
-                                memory_address)
                         end
-                    else
-                        error("no memory address provided for " .. command)
+                        -- also account for the fact we're gonna be consuming the operand
+                        index = index + 1
                     end
                 else
-                    machine.addresses[current_address] = construct_address_value_for_op(command.opcode, 00)
+                    -- and now commands that don't require operands which should be easy
+                    machine.addresses[memory_address] = construct_address_value_for_op(command.opcode,
+                        00)
+                end
+            else
+                -- this is probably a label or a DAT instruction
+
+                local potential_command = get_command_from_input(separated_assembly[index + 1])
+
+                if potential_command then
+                    -- this is simply because we're not bothering recording this label by any means (we've already registered it's existance)
+                    memory_address = memory_address - 1
+                else
+                    -- this is 100% a DAT declaration
+                    if string.upper(separated_assembly[index + 1]) == "DAT" then
+                        -- we just want to find out how much we should offset index by
+                        local potential_value = separated_assembly[index + 2]
+
+                        if potential_value then
+                            -- make sure it's an integer/number
+                            if tonumber(potential_value) then
+                                index = index + 2
+                            else
+                                index = index + 1
+                            end
+                        else
+                            index = index + 1
+                        end
+
+                        -- account for the fact that this will already be registered in memory.
+                        -- label for instruction isn't registered in memory, so we shouldn't consider it here
+                        -- DAT label is registered in memory (the value of the dat label) already, but again we don't need to consider the label
+                        memory_address = memory_address - 1
+                    end
                 end
             end
 
             index = index + 1
-            current_address = current_address + 1
+            memory_address = memory_address + 1
         end
     end
 
@@ -307,6 +356,14 @@ little_assembly.run_program = function(machine)
 
         machine.program_counter = machine.program_counter + 1
     end
+end
+
+little_assembly._display_memory_addresses = function(machine)
+    print("MEMORY ADDRESSES:\n")
+    for index, value in ipairs(machine.addresses) do
+        print(index, " - ", value)
+    end
+    print("\n")
 end
 
 
